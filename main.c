@@ -10,6 +10,7 @@
 
 void init();
 uint8_t inc_band_mask(uint8_t mask);
+uint8_t set_scart_mux(uint8_t sw, uint8_t pos);
 
 //band switch LUT
 uint8_t bandmodes[] = {0, 0b11, 0b111};
@@ -21,12 +22,13 @@ uint8_t bandmodes[] = {0, 0b11, 0b111};
 char * menutext[] = {"band", "pump", "highcur", "test0", "tunespeed"};
 pll_settings pll[NUMPLLS];
 uint8_t tunespeed;
+uint8_t band = 0;
 
+#define DEFAULT_DIV 8670
 
-void menu_command(char *output, uint8_t cmd, uint8_t num_pll)
+void menu_pll(char *output, uint8_t cmd, uint8_t num_pll)
 {
 	uint8_t value;
-	static uint8_t band = 0;
 	if(cmd > MENUSIZE || num_pll > NUMPLLS-1) return;
 	pll_settings *p = &pll[num_pll];
 
@@ -67,11 +69,11 @@ void menu_command(char *output, uint8_t cmd, uint8_t num_pll)
 	sprintf(output, "0x%X %s: %i, a: %s\r\n", p->addr, menutext[cmd], value, pll_update_ctrl(p)?"ok":"FAIL");
 }
 
-
+uint8_t swpos = 0;
 void menu_loop()
 {
 	uint8_t menu = 0;
-	uint16_t div = 10082, lastdiv = div;
+	uint16_t div = DEFAULT_DIV, lastdiv = div;
 	char buf[50];
 
 	while(23 != 42)
@@ -88,7 +90,7 @@ void menu_loop()
 				break;
 
 			case _BV(PB1):
-				menu_command(buf, menu>>1, menu % NUMPLLS);
+				menu_pll(buf, menu>>1, menu % NUMPLLS);
 				uart_putstr(buf);
 				_delay_ms(100);
 				break;
@@ -119,6 +121,30 @@ void menu_loop()
 			sprintf(buf, "div: %i, %s\r\n", div, (pll_update_all(&pll[0]) & pll_update_all(&pll[1]))?"ok":"FAIL");
 			uart_putstr(buf);
 			_delay_us(500);
+		}
+
+		if(uart_getc_nb(buf))
+		{
+			switch(*buf)
+			{
+				case 'x':
+					swpos++;
+					break;
+
+				case 'y':
+					swpos--;
+					break;
+
+				default:
+					break;
+			}
+			swpos &= 7;
+			sprintf(buf, "mux: %i %i %i\r\n", (swpos & 4)?1:0, (swpos & 2)?1:0, (swpos & 1)?1:0);
+			uart_putstr(buf);
+			set_scart_mux(0, swpos);
+			set_scart_mux(1, swpos);
+			set_scart_mux(2, swpos);
+			set_scart_mux(3, swpos);
 		}
 	}
 }
@@ -169,6 +195,113 @@ void sniffer_loop()
 	}
 }
 
+uint8_t set_scart_mux(uint8_t sw, uint8_t pos)
+{
+	uint8_t ack = 1;
+	i2cStart();
+	ack &= i2cPutbyte(0x92);
+	ack &= i2cPutbyte(((sw & 3) << 4) | (pos & 7));
+	i2cStop();
+
+	return ack;
+}
+
+#define FP_ADDR 0x10
+#define DSP_ADDR 0x12
+
+uint8_t write_dsp(uint16_t addr, uint16_t value)
+{
+	uint8_t ack = 1;
+	i2cStart();
+	ack &= i2cPutbyte(0x80);
+	ack &= i2cPutbyte(DSP_ADDR);
+	ack &= i2cPutbyte(addr >> 8);
+	ack &= i2cPutbyte(addr & 0xFF);
+	ack &= i2cPutbyte(value >> 8);
+	ack &= i2cPutbyte(value & 0xFF);
+	i2cStop();
+
+	return ack;
+}
+uint8_t write_fp(uint16_t addr, uint16_t value)
+{
+	uint8_t ack = 1;
+	i2cStart();
+	ack &= i2cPutbyte(0x80);
+	ack &= i2cPutbyte(FP_ADDR);
+	ack &= i2cPutbyte(addr >> 8);
+	ack &= i2cPutbyte(addr & 0xFF);
+	ack &= i2cPutbyte(value >> 8);
+	ack &= i2cPutbyte(value & 0xFF);
+	i2cStop();
+
+	return ack;
+}
+
+#define FP_AD_CV 0x00BB
+#define FP_MODE_REG 0x0083
+#define FP_FIR_REG_1 0x001
+#define FP_FIR_REG_2 0x005
+#define FP_DCO1_LO 0x0093
+#define FP_DCO1_HI 0x009B
+#define FP_DCO2_LO 0x00A3
+#define FP_DCO2_HI 0x00AB
+#define FP_FAWCT_SOLL 0x0107
+#define FP_FAW_ER_TOL  0x010F
+#define FP_AUDIO_PLL 0x02D7
+#define FP_CMD_LOAD_REG_1_2 0x0056
+#define FP_CMD_LOAD_REG_1 0x0060
+#define FP_CMD_SEARCH_NICAM 0x0078
+#define FP_CMD_SELF_TEXT 0x0792
+
+uint8_t fir_german_dual_fm[] = {3, 18, 27, 48, 66, 72};
+
+//general initialization of demodulator
+uint8_t init_fp()
+{
+	uint8_t i, ack = 1;
+
+	//set stuff
+	ack &= write_fp(FP_AD_CV, 32 | 1 << 8); //16.6dB constant gain, analog in 2
+	ack &= write_fp(FP_AUDIO_PLL, 1); //close pll
+
+	//setup faw with suggested values (not using nicam anyway)
+	ack &= write_fp(FP_FAWCT_SOLL, 12);
+	ack &= write_fp(FP_FAW_ER_TOL, 2);
+
+	//fir
+	for(i = sizeof(fir_german_dual_fm)-1; i >= 0; i--)
+		ack &= write_fp(FP_FIR_REG_1, fir_german_dual_fm[i]);
+	for(i = sizeof(fir_german_dual_fm)-1; i >= 0; i--)
+		ack &= write_fp(FP_FIR_REG_2, fir_german_dual_fm[i]);
+
+	//set all mode flags to fm processing
+	ack &= write_fp(FP_MODE_REG, 1<<7);
+
+	//write dco values
+	ack &= write_fp(FP_DCO1_HI, 0x04C6);
+	ack &= write_fp(FP_DCO1_LO, 0x038E);
+	ack &= write_fp(FP_DCO2_HI, 0x04C6);
+	ack &= write_fp(FP_DCO2_LO, 0x038E);
+
+	//load registers
+	ack &= write_fp(FP_CMD_LOAD_REG_1_2, 0);
+
+	return ack;
+}
+
+#define DSP_VOL_LOUD 0x0000
+#define DSP_VOL_HEAD 0x0009
+#define DSP_VOL_SCART 0x0007
+
+void init_dsp()
+{
+	write_dsp(DSP_VOL_LOUD, 0x73<<8);
+	write_dsp(DSP_VOL_SCART, 0x40<<8);
+	write_dsp(DSP_VOL_HEAD, 0x73<<8);
+	write_dsp(0x000E, 0x30<<8);
+	write_dsp(0x000D, 0x19<<8);
+}
 
 int main(void)
 {
@@ -184,10 +317,17 @@ int main(void)
 
 	//pretune channel 36 (591.2MHz)
 	pll[0].c1 &= ~_BV(PLL_DISABLE_PUMP);
-	pll[0].div = 10082;
+	pll[0].div = DEFAULT_DIV;
+	pll[1].c1 = 0x9f;
+	pll[1].c2 = 0x0;
+	pll[1].div = 0x12f4;
 	pll[1].c1 &= ~_BV(PLL_DISABLE_PUMP);
-	pll[1].div = 10082;
+	pll[1].div = DEFAULT_DIV;
 	pll_update_all(&pll[0]);
+
+	//init sound processor
+	init_fp();
+	init_dsp();
 
 	//test bands
 	//try_all_bands(10);
@@ -218,6 +358,12 @@ void init()
 
 	//enable keypad pullups
 	PORTB |=  0x0F;
+
+	//init scart mux
+	set_scart_mux(0, 0);
+	set_scart_mux(1, 0);
+	set_scart_mux(2, 1); //tuner to lower scart
+	set_scart_mux(3, 0);
 
 	//enable interrupts
 	sei();
