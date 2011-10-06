@@ -10,34 +10,32 @@
 
 void init();
 uint8_t inc_band_mask(uint8_t mask);
-//uint8_t setBand(uint8_t addr, uint8_t bandindex);
 
 //band switch LUT
-uint8_t bandmodes[] = {0, 0b0001, 0b0010, 0b0011, 0b0100, 0b0111, 0b00010000, 0b10000000, 0b10001000, 0b10000001, 0b10000010, 0b10000100, 0xff};
+uint8_t bandmodes[] = {0, 0b11, 0b111};
 #define BANDS (sizeof(bandmodes))
 
 //div. stuff
-#define MENUSIZE 4
+#define MENUSIZE 5
 #define NUMPLLS 2
-char * menutext[] = {"band", "pump", "highcur", "test0"};
+char * menutext[] = {"band", "pump", "highcur", "test0", "tunespeed"};
 pll_settings pll[NUMPLLS];
-
-/*uint8_t setBand(uint8_t addr, uint8_t bandindex)
-{
-	return pll_update_ctrl(0xC2, PLL_C1_DEFAULT, bandmodes[bandindex]);
-}*/
+uint8_t tunespeed;
 
 
 void menu_command(char *output, uint8_t cmd, uint8_t num_pll)
 {
 	uint8_t value;
+	static uint8_t band = 0;
 	if(cmd > MENUSIZE || num_pll > NUMPLLS-1) return;
 	pll_settings *p = &pll[num_pll];
 
 	switch(cmd)
 	{
 		case 0:
-			p->c2 = inc_band_mask(p->c2);
+			//p->c2 = inc_band_mask(p->c2);
+			p->c2 = bandmodes[band++];
+			if(band >= BANDS) band = 0;
 			value = p->c2 & 0b10010111;
 			break;
 
@@ -54,6 +52,12 @@ void menu_command(char *output, uint8_t cmd, uint8_t num_pll)
 		case 3:
 			p->c1 ^= _BV(PLL_TEST0);
 			value = p->c1 & _BV(PLL_TEST0);
+			break;
+
+		case 4:
+			tunespeed <<= 1;
+			if(tunespeed == 0) tunespeed = 1;
+			value = tunespeed;
 			break;
 
 		default:
@@ -90,12 +94,12 @@ void menu_loop()
 				break;
 
 			case _BV(PB2):
-				div -= 2;
+				div -= tunespeed;
 				_delay_ms(50);
 				break;
 
 			case _BV(PB3):
-				div += 2;
+				div += tunespeed;
 				_delay_ms(50);
 				break;
 		}
@@ -110,6 +114,8 @@ void menu_loop()
 		if(div != lastdiv)
 		{
 			lastdiv = div;
+			pll[0].div = div;
+			pll[1].div = div;
 			sprintf(buf, "div: %i, %s\r\n", div, (pll_update_all(&pll[0]) & pll_update_all(&pll[1]))?"ok":"FAIL");
 			uart_putstr(buf);
 			_delay_us(500);
@@ -179,6 +185,8 @@ int main(void)
 	//pretune channel 36 (591.2MHz)
 	pll[0].c1 &= ~_BV(PLL_DISABLE_PUMP);
 	pll[0].div = 10082;
+	pll[1].c1 &= ~_BV(PLL_DISABLE_PUMP);
+	pll[1].div = 10082;
 	pll_update_all(&pll[0]);
 
 	//test bands
@@ -198,6 +206,8 @@ void init()
 {
 	//disable analog comparator (to save power)
 	//ACSR |= _BV(ACD);
+
+	tunespeed = 1;
 
 	//init serial port to 19200bps
 	uart_init();
